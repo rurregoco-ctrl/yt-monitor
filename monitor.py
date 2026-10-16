@@ -136,8 +136,19 @@ def get_transcript(video_id):
 
 
 # ------------------------------------------------------------------ RESUMEN --
+def clean_description(text, limit=300):
+    """Quita enlaces y saltos de línea; devuelve un extracto corto."""
+    text = re.sub(r"https?://\S+", "", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "Sin descripción disponible."
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "…"
+
+
 def summarize(video, transcript):
-    fallback = video["description"].strip().replace("\n", " ")[:280]
+    fallback = clean_description(video["description"])
     if not ANTHROPIC_KEY:
         return fallback or "Sin resumen disponible."
     try:
@@ -214,6 +225,8 @@ def main():
     state = load_state()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)
     sent = 0
+    sample = None  # video más reciente, para la prueba manual
+    manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
 
     for handle in CHANNELS:
         try:
@@ -225,6 +238,9 @@ def main():
         except Exception as exc:
             print(f"[{handle}] error: {exc}")
             continue
+
+        if sample is None and videos:
+            sample = max(videos, key=lambda x: x["published"])
 
         # Primera vez que vemos este canal: solo "sembramos" lo existente
         if cid not in state["initialized"]:
@@ -242,13 +258,23 @@ def main():
                 state["seen"].append(v["id"])
                 print("  omitido (antiguo o Short)")
                 continue
-            summary = summarize(v, get_transcript(v["id"]))
+            transcript = get_transcript(v["id"]) if ANTHROPIC_KEY else ""
+            summary = summarize(v, transcript)
             if NTFY_TOPIC and not notify_ntfy(v, summary):
                 print("  ntfy falló; se reintenta en la próxima ejecución")
                 continue
             notify_whatsapp(v, summary)
             state["seen"].append(v["id"])
             sent += 1
+
+    if manual and sample:
+        test_video = dict(sample)
+        test_video["title"] = "[PRUEBA] " + sample["title"]
+        print(f"Ejecución manual: aviso de prueba con un video de {sample['channel']}")
+        test_summary = summarize(test_video, "")
+        if NTFY_TOPIC:
+            notify_ntfy(test_video, test_summary)
+        notify_whatsapp(test_video, test_summary)
 
     save_state(state)
     print(f"Listo. Notificaciones enviadas: {sent}")
