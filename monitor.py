@@ -147,10 +147,32 @@ def clean_description(text, limit=300):
     return text[:limit].rsplit(" ", 1)[0] + "…"
 
 
+def translate_es(text):
+    """Traduce al español con el traductor web gratuito de Google.
+
+    Es un servicio no oficial: si falla, devuelve el texto original.
+    """
+    if not text or not text.strip():
+        return text
+    try:
+        r = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "es", "dt": "t", "q": text},
+            headers=HEADERS,
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+        translated = "".join(part[0] for part in data[0] if part and part[0])
+        return translated.strip() or text
+    except Exception as exc:
+        print(f"  (no se pudo traducir: {type(exc).__name__}: {exc})")
+        return text
+
+
 def summarize(video, transcript):
-    fallback = clean_description(video["description"])
     if not ANTHROPIC_KEY:
-        return fallback or "Sin resumen disponible."
+        return translate_es(clean_description(video["description"]))
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -178,10 +200,30 @@ def summarize(video, transcript):
         return text
     except Exception as exc:
         print(f"  (falló el resumen: {type(exc).__name__}: {exc})")
-        return fallback or "Sin resumen disponible."
+        return translate_es(clean_description(video["description"]))
 
 
 # ------------------------------------------------------------ NOTIFICACIONES -
+def localize(video):
+    """Copia del video con el título traducido al español."""
+    out = dict(video)
+    out["title"] = translate_es(video["title"])
+    out["original_title"] = video["title"]
+    return out
+
+
+def shown_title(video):
+    return f"{video.get('prefix', '')}{video['title']}"
+
+
+def original_line(video):
+    """Línea con el título original, solo si la traducción lo cambió."""
+    orig = (video.get("original_title") or "").strip()
+    if orig and orig != video["title"].strip():
+        return f"\n\nTítulo original: {orig}"
+    return ""
+
+
 def notify_ntfy(video, summary):
     if not NTFY_TOPIC:
         return True
@@ -189,10 +231,9 @@ def notify_ntfy(video, summary):
         "https://ntfy.sh/",
         json={
             "topic": NTFY_TOPIC,
-            "title": f"📺 {video['channel']}: {video['title']}"[:200],
-            "message": f"{summary}\n\n▶️ {video['url']}"[:3500],
+            "title": f"📺 {video['channel']}: {shown_title(video)}"[:200],
+            "message": f"{summary}{original_line(video)}\n\n▶️ {video['url']}"[:3500],
             "click": video["url"],
-            "tags": ["tv"],
         },
         timeout=20,
     )
@@ -204,8 +245,8 @@ def notify_whatsapp(video, summary):
         return
     text = (
         f"📺 *{video['channel']}*\n"
-        f"🎬 {video['title']}\n\n"
-        f"{summary}\n\n"
+        f"🎬 {shown_title(video)}\n\n"
+        f"{summary}{original_line(video)}\n\n"
         f"▶️ {video['url']}"
     )
     try:
@@ -260,18 +301,19 @@ def main():
                 continue
             transcript = get_transcript(v["id"]) if ANTHROPIC_KEY else ""
             summary = summarize(v, transcript)
-            if NTFY_TOPIC and not notify_ntfy(v, summary):
+            out = localize(v)
+            if NTFY_TOPIC and not notify_ntfy(out, summary):
                 print("  ntfy falló; se reintenta en la próxima ejecución")
                 continue
-            notify_whatsapp(v, summary)
+            notify_whatsapp(out, summary)
             state["seen"].append(v["id"])
             sent += 1
 
     if manual and sample:
-        test_video = dict(sample)
-        test_video["title"] = "[PRUEBA] " + sample["title"]
+        test_summary = summarize(sample, "")
+        test_video = localize(sample)
+        test_video["prefix"] = "[PRUEBA] "
         print(f"Ejecución manual: aviso de prueba con un video de {sample['channel']}")
-        test_summary = summarize(test_video, "")
         if NTFY_TOPIC:
             notify_ntfy(test_video, test_summary)
         notify_whatsapp(test_video, test_summary)
